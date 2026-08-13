@@ -82,7 +82,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         {
             "role": "system",
             "content": (
-                "You are a helpful AI assistant for [YOUR_DOMAIN]. "
+                "You are a helpful AI assistant for enterprise Kubernetes and OpenShift platform engineering, SRE, and production incident troubleshooting "
                 "Answer clearly and concisely. "
                 "If you don't know something, say so honestly rather than guessing."
             ),
@@ -97,7 +97,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 # Feature 2: Structured chat  (complete — do not modify)
 # ---------------------------------------------------------------------------
 
-_STRUCTURED_SYSTEM_PROMPT = """You are a helpful AI assistant for [YOUR_DOMAIN].
+_STRUCTURED_SYSTEM_PROMPT = """You are a helpful AI assistant for enterprise Kubernetes and OpenShift platform engineering, SRE, and production incident troubleshooting.
 
 For every user message, respond ONLY with a JSON object (no markdown, no extra text)
 with exactly these four fields:
@@ -110,8 +110,8 @@ with exactly these four fields:
 }
 
 Intent definitions:
-- "general_question": factual/knowledge query not specific to [YOUR_DOMAIN]
-- "domain_question": a question specifically about [YOUR_DOMAIN] and its offerings
+- "general_question": factual/knowledge query not specific to enterprise Kubernetes and OpenShift platform engineering, SRE, and production incident troubleshooting
+- "domain_question": a question specifically about enterprise Kubernetes and OpenShift platform engineering, SRE, and production incident troubleshooting and its offerings
 - "action_request": the user wants something DONE (book, schedule, find, order, send…)
 - "unclear": ambiguous, nonsensical, or doesn't fit the other categories
 
@@ -154,102 +154,102 @@ async def chat_structured(request: ChatRequest) -> StructuredResponse:
 
 @app.post("/api/sessions")
 async def new_session() -> dict:
-    """
-    Create a new session and return its ID.
-
-    Steps:
-      1. Call create_session() from session_store.py.
-      2. Return {"session_id": <the id>}.
-
-    After implementing, the sidebar's "New Chat" button will work.
-    """
-    # TODO (Feature 3, Step 6a): Implement new_session().
-    # One line: session_id = create_session()
-    # One line: return {"session_id": session_id}
-    raise NotImplementedError("Implement new_session()")
-
+    session_id = create_session()
+    return {"session_id": session_id}
 
 @app.get("/api/sessions", response_model=list[SessionSummary])
 async def sessions_list() -> list[SessionSummary]:
-    """
-    List all sessions, most recent first, as sidebar summaries.
+    summaries = []
 
-    Steps:
-      1. Call list_sessions() to get all Session objects.
-      2. For each session, find the first user message (or use "New conversation").
-      3. Truncate it to 60 characters for the sidebar title.
-      4. Return a list of SessionSummary objects.
+    for s in list_sessions():
+        first_user_msg = next(
+            (m.content for m in s.messages if m.role == "user"),
+            "",
+        )
 
-    Hint — find the first user message:
-      next((m.content for m in s.messages if m.role == "user"), "")
-    """
-    # TODO (Feature 3, Step 6b): Implement sessions_list().
-    raise NotImplementedError("Implement sessions_list()")
+        title = (
+            first_user_msg[:60] + "…"
+            if len(first_user_msg) > 60
+            else first_user_msg or "New conversation"
+        )
 
+        summaries.append(
+            SessionSummary(
+                id=s.id,
+                created_at=s.created_at.isoformat(),
+                message_count=len(s.messages),
+                title=title,
+            )
+        )
+
+    return summaries
 
 @app.post("/api/sessions/{session_id}/chat", response_model=StructuredResponse)
 async def session_chat(session_id: str, request: ChatRequest) -> StructuredResponse:
-    """
-    Send a message within a session and get a structured reply with full history.
+    session = get_session(session_id)
 
-    Steps:
-      1. Look up the session with get_session(session_id).
-         If None, raise HTTPException(status_code=404, detail="...").
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session '{session_id}' not found.",
+        )
 
-      2. Build the messages list:
-           messages = [{"role": "system", "content": _STRUCTURED_SYSTEM_PROMPT}]
+    messages = [
+        {
+            "role": "system",
+            "content": _STRUCTURED_SYSTEM_PROMPT,
+        }
+    ]
 
-      3. Apply the sliding window:
-           history = session.messages
-           # TODO (Feature 3, Step 7): CONTEXT WINDOW MANAGEMENT
-           # If len(history) > CONTEXT_WINDOW_SIZE, keep only the last
-           # CONTEXT_WINDOW_SIZE messages:
-           #   history = history[-CONTEXT_WINDOW_SIZE:]
-           # This prevents the prompt from exceeding the model's context limit.
-           # See resource/memory-patterns-guide.md for smarter approaches.
+    history = session.messages
 
-      4. Add each history message to `messages`:
-           for msg in history:
-               messages.append({"role": msg.role, "content": msg.content})
+    if len(history) > CONTEXT_WINDOW_SIZE:
+        history = history[-CONTEXT_WINDOW_SIZE:]
 
-      5. Append the new user message:
-           messages.append({"role": "user", "content": request.message})
+    for msg in history:
+        messages.append(
+            {
+                "role": msg.role,
+                "content": msg.content,
+            }
+        )
 
-      6. Persist the user message BEFORE calling the LLM:
-           add_message(session_id, "user", request.message)
+    messages.append(
+        {
+            "role": "user",
+            "content": request.message,
+        }
+    )
 
-      7. Call the LLM:
-           result = await call_llm(messages, temperature=0.3,
-                                   response_format={"type": "json_object"})
-         IMPORTANT: access the text as result.content (not result.choices[0].message.content).
-         call_llm() returns a LLMResponse object — .content works for ALL providers
-         (OpenAI, Groq, Anthropic, Ollama, etc.). choices[0] only works for raw OpenAI objects.
+    add_message(session_id, "user", request.message)
 
-      8. Parse the result:
-           structured = _parse_structured(result.content or "")
+    result = await call_llm(
+        messages,
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
 
-      9. Persist ONLY the answer text as the assistant's history entry
-         (not the full JSON — clean history is better for context):
-           add_message(session_id, "assistant", structured.answer)
+    structured = _parse_structured(result.content or "")
 
-      10. Return structured.
-    """
-    # TODO (Feature 3, Step 6c): Implement session_chat() following the steps above.
-    raise NotImplementedError("Implement session_chat()")
+    add_message(
+        session_id,
+        "assistant",
+        structured.answer,
+    )
 
+    return structured
 
 @app.get("/api/sessions/{session_id}/history", response_model=list[Message])
 async def session_history(session_id: str) -> list[Message]:
-    """
-    Return the full message history for a session.
+    session = get_session(session_id)
 
-    Steps:
-      1. Look up with get_session(session_id); raise 404 if None.
-      2. Return session.messages.
-    """
-    # TODO (Feature 3, Step 6d): Implement session_history().
-    raise NotImplementedError("Implement session_history()")
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session '{session_id}' not found.",
+        )
 
+    return session.messages
 
 @app.get("/api/health")
 async def health():
