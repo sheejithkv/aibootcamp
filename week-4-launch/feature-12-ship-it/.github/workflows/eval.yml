@@ -1,0 +1,99 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# eval.yml — AI Eval Quality Gate
+#
+# WHAT THIS WORKFLOW DOES:
+#   On every push and pull request to main, this workflow:
+#   1. Runs smoke tests to verify the app loads and responds correctly.
+#   2. Runs the eval harness to check that AI response quality meets the bar.
+#
+# WHY TWO SEPARATE CHECKS?
+#   - Smoke tests  → "does the app run?" (structural, fast, deterministic)
+#   - Eval tests   → "does the AI think well?" (quality, slower, uses real LLM)
+#   Both matter. An app can pass smoke tests but give terrible answers.
+#   An app can give great answers but crash on startup. You need both.
+#
+# SETTING UP YOUR API KEY (REQUIRED):
+#   This workflow calls real LLM APIs in the eval step. You must add your
+#   API key as a GitHub secret — NEVER paste it directly in this file.
+#
+#   To add a secret:
+#     GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+#     Name:  GROQ_API_KEY   (or OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+#     Value: your key
+#
+#   The secret is encrypted at rest, masked in logs, and never exposed to
+#   forks. This is how production teams handle credentials in CI.
+#
+# OLLAMA USERS — local models don't run in GitHub's CI runners:
+#   The eval step uses `if: env.GROQ_API_KEY != ''` so it's automatically
+#   skipped when no API key is present. You have two options:
+#     a) Add a FREE Groq key (console.groq.com) as a GitHub secret — this
+#        gives you real eval CI with the same fast inference Groq provides locally.
+#     b) Leave the secret empty and run evals manually:
+#          python week-4-launch/feature-12-ship-it/tests/run_eval_ci.py
+#
+# THE 0.7 THRESHOLD:
+#   70% is a reasonable starting floor. Teams tune this based on risk tolerance.
+#   Once your domain documents are indexed, raise it to 80%.
+#   If you swap LLM providers or update your system prompt, watch this number —
+#   a drop means something changed the model's routing or answer behaviour.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: AI Eval Quality Gate
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Check out the repository ────────────────────────────────────────
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ───────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache the pip packages based on requirements.txt.
+          # If requirements.txt hasn't changed, pip install is skipped.
+          cache: "pip"
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Smoke tests ─────────────────────────────────────────────────────
+      # Structural checks: app imports correctly, /api/health returns 200,
+      # / serves the static UI. These run REGARDLESS of whether an API key
+      # is present — they don't make real LLM calls.
+      - name: Smoke tests (import + health + UI)
+        run: python -m pytest week-4-launch/feature-12-ship-it/tests/test_smoke.py -v
+        env:
+          # Provider config — needed for the app to load without erroring.
+          LLM_PROVIDER: groq
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.3-70b-versatile
+          VECTOR_DB_PATH: /tmp/ci-chroma
+
+      # ── 5. Eval quality gate ───────────────────────────────────────────────
+      # AI quality checks: load 10 golden test cases, run classify_query +
+      # vector_search + call_llm for each, assert pass_rate >= 0.7.
+      # This step FAILS the build if AI quality drops below the threshold.
+      #
+      # `if: env.GROQ_API_KEY != ''` skips this step gracefully when no
+      # cloud API key is configured (e.g. Ollama-only setups).
+      - name: Eval quality gate (pass rate ≥ 70%)
+        if: env.GROQ_API_KEY != ''
+        run: python week-4-launch/feature-12-ship-it/tests/run_eval_ci.py
+        env:
+          LLM_PROVIDER: groq
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.3-70b-versatile
+          VECTOR_DB_PATH: /tmp/ci-chroma

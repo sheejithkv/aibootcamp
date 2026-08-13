@@ -1,0 +1,56 @@
+# .dockerignore — exclude files from the Docker build context
+#
+# When Docker builds an image, it first sends the entire build context
+# (the repo root) to the Docker daemon. This file tells Docker which
+# files and directories to SKIP — reducing build time and preventing
+# secrets from ever entering the image.
+#
+# Rule of thumb: if it's in .gitignore, it should probably be here too.
+
+# Python runtime artifacts — these are generated files, not source code
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments — the image installs its own packages via pip
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files — NEVER include secrets in the image
+# API keys are passed at runtime via `env_file` in docker-compose.yml
+.env
+.env.local
+.env.*.local
+
+# Local data directories — the container uses named Docker volumes instead
+data/
+*.db
+
+# Git history — not needed in the image, just adds size
+.git/
+.gitignore
+.github/
+
+# IDE and editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# Node artifacts (not used, but just in case)
+node_modules/

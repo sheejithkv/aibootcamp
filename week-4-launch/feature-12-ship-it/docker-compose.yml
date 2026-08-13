@@ -1,0 +1,85 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# docker-compose.yml — AI Engineering Bootcamp (BlockseBlock) · Feature 12
+#
+# WHAT IS DOCKER COMPOSE?
+#   docker-compose.yml defines your full application stack as code — which
+#   containers to run, how they connect, where data is stored, and which
+#   environment variables to pass in. Instead of a long `docker run` command
+#   you type once and forget, this file is committed to git and reproduced
+#   identically on every machine.
+#
+# USAGE:
+#   cd week-4-launch/feature-12-ship-it/
+#   docker compose up --build        ← first run (builds the image)
+#   docker compose up                ← subsequent runs (reuses cached image)
+#   docker compose down              ← stop and remove containers
+#   docker compose logs -f           ← tail live logs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+services:
+  app:
+    build:
+      # The build context is the REPO ROOT (two levels up from this file).
+      # This lets the Dockerfile COPY shared/, ui/, and the solution code —
+      # all of which live at the repo root or below it.
+      context: ../..
+      dockerfile: week-4-launch/feature-12-ship-it/Dockerfile
+
+    # Map host port 8000 → container port 8000.
+    # After `docker compose up`, open http://localhost:8000 in your browser.
+    ports:
+      - "8000:8000"
+
+    # Load all environment variables from the .env file at the repo root.
+    # This is how API keys, model names, and feature flags reach the container.
+    #
+    # IMPORTANT: .env is listed in .dockerignore so it is NEVER baked into
+    # the image. The image itself contains no secrets — they're injected at
+    # runtime via this env_file directive.
+    env_file:
+      - ../../.env
+
+    # Override specific env vars that differ between local dev and container.
+    # VECTOR_DB_PATH must point to the volume mount, not the local ./data dir.
+    environment:
+      - VECTOR_DB_PATH=/data/chroma
+
+    volumes:
+      # WHY ARE THESE VOLUMES NECESSARY?
+      #
+      # Without named volumes, every `docker compose down` followed by
+      # `docker compose up` destroys ALL data inside the container:
+      #   - Your entire vector database (every document you embedded)
+      #   - Every uploaded file (PDF, DOCX, TXT)
+      #
+      # Named volumes persist data independently of the container lifecycle.
+      # You can stop, restart, update, or recreate the container without
+      # losing a single uploaded document or embedding.
+      #
+      # The volume names (chroma_data, uploads_data) are defined in the
+      # `volumes:` section at the bottom of this file.
+      - chroma_data:/data/chroma    # Chroma vector DB (document embeddings)
+      - uploads_data:/data/uploads  # raw uploaded files
+
+    # Docker calls GET /api/health every 30 seconds.
+    # If the endpoint returns a non-2xx response 3 times in a row, Docker marks
+    # the container "unhealthy." Combine with `restart: on-failure` (or use an
+    # orchestrator like ECS/Cloud Run) to auto-recover from crashes.
+    #
+    # The start_period gives the app 20 seconds to boot before health checks begin.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # Automatically restart the container if it crashes.
+    restart: unless-stopped
+
+# Named volumes — Docker manages these on the host machine.
+# To see where they live: `docker volume inspect feature-12-ship-it_chroma_data`
+# To wipe all data (nuclear option): `docker compose down -v`
+volumes:
+  chroma_data:
+  uploads_data:
