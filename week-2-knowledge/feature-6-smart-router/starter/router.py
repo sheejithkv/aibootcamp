@@ -49,6 +49,26 @@ Query type definitions:
   (e.g. "What was net revenue in Q3?", "What are the termination clauses?").
 - "ambiguous": genuinely unclear whether domain documents would help.
 
+IMPORTANT AMBIGUITY RULES:
+- Vague references such as "the policy", "the document", "that procedure",
+  "it", or "this" without identifying which policy/document/topic MUST be
+  classified as "ambiguous".
+- For ambiguous queries, set needs_retrieval=true because document context
+  may help, but set confidence between 0.4 and 0.6.
+- Do NOT classify a vague mention of "policy" as a confident domain query
+  unless the user identifies the specific policy, organization, document,
+  section, or subject.
+
+Required example:
+User: "Tell me about the policy."
+Return approximately:
+{
+  "needs_retrieval": true,
+  "confidence": 0.5,
+  "reasoning": "The user did not specify which policy they mean.",
+  "query_type": "ambiguous"
+}
+
 Confidence guide:
 - 0.9–1.0: very clear (obvious greeting vs obvious domain question)
 - 0.7–0.8: reasonably clear but some uncertainty

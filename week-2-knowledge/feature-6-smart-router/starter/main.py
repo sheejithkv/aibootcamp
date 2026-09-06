@@ -71,7 +71,7 @@ from shared.retrieval_memory import (
     get_recent_retrievals,
     log_retrieval,
 )
-from shared.router import classify_query
+from router import classify_query
 from shared.session_store import add_message, create_session, get_session, list_sessions
 from shared.tenant_context import get_tenant_id
 from shared.vector_store import (
