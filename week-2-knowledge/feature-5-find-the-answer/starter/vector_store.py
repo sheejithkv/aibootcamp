@@ -1,32 +1,20 @@
 """
-Feature 5 starter: vector store — YOUR IMPLEMENTATION GOES HERE.
+Vector store for Feature 5: Find the Answer.
 
-The complete version lives in shared/vector_store.py (read it for reference).
+Wraps ChromaDB for persistent, disk-backed chunk embeddings.
+Uses Chroma's built-in ONNX embedding function — no external API key
+needed. Under the hood: all-MiniLM-L6-v2 producing 384-dimensional vectors.
 
-WHAT THIS MODULE DOES:
-  Every time a document is uploaded, its text chunks are converted to numeric
-  vectors (embeddings) and stored in a local ChromaDB database on disk. When
-  a user asks a question, their question is also converted to a vector, and
-  we find the stored chunks whose vectors are nearest to the question vector.
+Unlike session_store.py which resets on every restart, this vector store
+persists to disk at VECTOR_DB_PATH — documents you upload survive a
+server restart.
 
-  Text → numbers → geometric space → nearest-neighbor search.
-  That is all semantic search is.
-
-CHROMA'S DEFAULT EMBEDDING FUNCTION:
-  We don't write any embedding code ourselves. When we call collection.add()
-  with plain text, Chroma automatically converts it to vectors using an
-  ONNX-optimised version of all-MiniLM-L6-v2 (384 dimensions). We never see
-  the numbers — we just hand over the text and get back similarity results.
-
-YOUR TASKS:
-  Step 1: implement the collection.add() call in add_chunks() (Step 1)
-  Step 2: implement the collection.query() call in search()   (Step 2)
-          + the distance-to-score conversion                  (Step 3)
-
-Provided complete (read, don't rewrite):
-  get_collection()           — database connection singleton
-  delete_document_chunks()   — cleanup on document delete
-  get_stats()                — aggregate statistics
+Public API:
+  get_collection()                              → chromadb.Collection
+  add_chunks(document_id, chunks, metadatas)    → None
+  search(query, top_k, filters)                 → list[dict]
+  delete_document_chunks(document_id)           → None
+  get_stats()                                   → dict
 """
 from pathlib import Path
 from typing import Any
@@ -34,71 +22,61 @@ from typing import Any
 import chromadb
 
 COLLECTION_NAME = "documents"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Chroma's built-in default
 
 _client: Any = None  # chromadb.ClientAPI — PersistentClient is a factory, not a class
 
-
-# =============================================================================
-# Provided complete — do NOT modify
-# =============================================================================
 
 def get_collection() -> chromadb.Collection:
     """
     Return the Chroma collection, creating it on first call.
 
-    Singleton pattern: opens the database once per process and reuses it.
-    Persists to disk at VECTOR_DB_PATH — unlike session_store.py which
-    resets on every restart, this database survives server restarts.
+    Singleton pattern: the PersistentClient is opened once per process and
+    reused. The database lives at VECTOR_DB_PATH (from settings), resolved
+    relative to the repo root so it's the same folder regardless of which
+    feature directory the server is started from.
+
+    Unlike session_store.py which resets on every restart, this vector store
+    persists to disk — your uploaded documents survive a server restart.
     """
     global _client
     if _client is None:
         from shared.config import settings
-        repo_root = Path(__file__).resolve().parents[3]
+
+        # Resolve path from repo root (shared/ lives one level below root)
+        repo_root = Path(__file__).resolve().parent.parent
         db_path = (repo_root / settings.vector_db_path).resolve()
         db_path.mkdir(parents=True, exist_ok=True)
+
         _client = chromadb.PersistentClient(path=str(db_path))
+
     return _client.get_or_create_collection(COLLECTION_NAME)
 
 
-def delete_document_chunks(document_id: str) -> None:
-    """Remove all vectors for a document from the collection."""
-    collection = get_collection()
-    if collection.count() == 0:
-        return
-    collection.delete(where={"document_id": document_id})
-
-
-def get_stats() -> dict:
-    """Return aggregate statistics about the vector store."""
-    collection = get_collection()
-    total = collection.count()
-    if total == 0:
-        return {"total_vectors": 0, "documents_indexed": 0, "embedding_model": EMBEDDING_MODEL_NAME}
-    all_items = collection.get(include=["metadatas"])
-    unique_doc_ids = {m.get("document_id") for m in all_items["metadatas"] if m.get("document_id")}
-    return {"total_vectors": total, "documents_indexed": len(unique_doc_ids), "embedding_model": EMBEDDING_MODEL_NAME}
-
-
-# =============================================================================
-# YOUR IMPLEMENTATION
-# =============================================================================
-
-def add_chunks(document_id: str, chunks: list[str], metadatas: list[dict]) -> None:
+def add_chunks(
+    document_id: str,
+    chunks: list[str],
+    metadatas: list[dict],
+    tenant_id: str = "default",
+) -> None:
     """
     Embed and store document chunks with metadata.
 
-    Chroma auto-embeds for us — we just pass the raw text. Under the hood,
-    each chunk becomes a 384-dimensional vector (all-MiniLM-L6-v2). We never
-    see the numbers; we just hand over text and let Chroma handle conversion.
+    Chroma auto-embeds the text for us. Under the hood: each chunk becomes
+    a 384-dimensional vector using the default all-MiniLM-L6-v2 model.
+    We never see the numbers — we just hand Chroma the text and it handles
+    the conversion.
 
-    IDs are deterministic: "{document_id}_{i}" so re-uploading overwrites
-    existing vectors rather than creating duplicates.
+    IDs are deterministic: "{document_id}_{i}" — so re-uploading the same
+    document overwrites its vectors rather than creating duplicates.
 
     Args:
-      document_id: the Document's UUID (from document_store)
-      chunks:      list of text strings to embed and store
-      metadatas:   parallel metadata dicts (filename, chunk_index, strategy)
+      document_id: the Document's UUID from document_store
+      chunks:      list of raw text strings to embed and index
+      metadatas:   parallel list of metadata dicts (filename, chunk_index …)
+                   None values are removed — Chroma does not support null metadata.
+      tenant_id:   tenant owner (Feature 6 Part B). Stored in metadata so
+                   search() can filter by it. Default "default" = single-tenant.
     """
     if not chunks:
         return
@@ -106,54 +84,64 @@ def add_chunks(document_id: str, chunks: list[str], metadatas: list[dict]) -> No
     collection = get_collection()
     ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
-    # Add document_id to metadata and remove None values (Chroma rejects them).
+    # Inject document_id and tenant_id into every metadata entry.
+    # Strip None values — Chroma rejects them.
     cleaned_metadatas = [
-        {k: v for k, v in {**m, "document_id": document_id}.items() if v is not None}
+        {k: v for k, v in {**m, "document_id": document_id, "tenant_id": tenant_id}.items()
+         if v is not None}
         for m in metadatas
     ]
 
-    # TODO (Feature 5, Step 1): call collection.add() to embed and store the chunks.
-    #
-    # collection.add(
-    #     documents=chunks,           # list[str] — Chroma embeds these automatically
-    #     metadatas=cleaned_metadatas, # list[dict] — stored alongside each vector
-    #     ids=ids,                    # list[str]  — unique ID per chunk
-    # )
-    raise NotImplementedError(
-        "Implement the collection.add() call — see the TODO above (Step 1)."
-    )
+    collection.add(documents=chunks, metadatas=cleaned_metadatas, ids=ids)
 
 
 def search(
     query: str,
     top_k: int = 5,
     filters: dict | None = None,
+    tenant_id: str | None = None,
 ) -> list[dict]:
     """
     Embed the query and return the top_k most similar chunks.
 
     Distance-to-score conversion:
-      Chroma returns L2 distances. We flip to a 0.0–1.0 similarity score:
-        score = max(0.0, 1.0 - (distance / 2.0))
-      distance 0 (identical) → score 1.0
-      distance 2 (opposite)  → score 0.0
-      Higher = more similar. More intuitive than raw distance.
+      Chroma returns L2 distances. We convert to a 0.0–1.0 similarity
+      score using:  score = max(0.0, 1.0 - (distance / 2.0))
+
+      This maps:
+        distance 0.0 (identical vectors)         → score 1.0
+        distance 2.0 (max possible for unit vecs) → score 0.0
+      Higher score = more similar. More intuitive than raw distance.
 
     NOTE — Similarity ≠ Relevance:
-      This score measures vector closeness, not answer quality. A chunk can
-      be semantically similar to your question without containing the answer.
+      This score measures how close two vector representations are —
+      not necessarily how relevant the chunk is to answering the question.
+      A chunk can be semantically similar without containing the answer.
+      A chunk with the exact answer can score low if it uses different words.
+
       This is the core limitation of vector RAG ("vibe retrieval").
-      Feature 6 adds LLM reasoning on top. PageIndex replaces this step
-      entirely for domains where similarity consistently falls short.
+      Feature 6's Smart Router adds LLM-based reasoning on top of this
+      similarity signal. PageIndex (Resource 4) replaces this step entirely
+      with reasoning-based retrieval for domains where similarity falls short.
 
     Args:
-      query:   the user's question (embedded using the same model)
-      top_k:   maximum results to return
-      filters: optional Chroma `where` clause, e.g. {"document_id": "abc"}
+      query:     the user's question (embedded using the same model as the chunks)
+      top_k:     maximum results to return
+      filters:   optional Chroma `where` clause for metadata filtering.
+                 {"document_id": "abc"} → search within one document only.
+      tenant_id: when ENABLE_MULTI_TENANT=true, restricts results to this tenant.
+                 This is the CRITICAL enforcement point for tenant isolation.
+                 Filtering at the vector database query level (not application level)
+                 means cross-tenant chunks are never even retrieved — a bug cannot
+                 leak data because the chunks don't come back at all.
 
     Returns:
-      list of dicts: {"text", "filename", "chunk_index", "score", "document_id"}
+      list of result dicts sorted by score (highest first):
+        {"text": str, "filename": str, "chunk_index": int,
+         "score": float, "document_id": str}
     """
+    from shared.config import settings
+
     collection = get_collection()
     total = collection.count()
     if total == 0:
@@ -161,36 +149,81 @@ def search(
 
     n_results = min(top_k, total)
 
+    # Merge any caller-supplied filters with the tenant_id isolation filter.
+    # TODO (Feature 6, Part B): add where={"tenant_id": tenant_id} to this
+    # collection.query() call — without this line, tenant isolation does NOT
+    # work at the vector database level and is purely cosmetic (app-level).
+    effective_filters: dict = dict(filters) if filters else {}
+    if settings.enable_multi_tenant and tenant_id:
+        effective_filters["tenant_id"] = tenant_id
+
     kwargs: dict = {"query_texts": [query], "n_results": n_results}
-    if filters:
-        kwargs["where"] = filters
+    if effective_filters:
+        kwargs["where"] = effective_filters
 
-    # TODO (Feature 5, Step 2): call collection.query() to find similar chunks.
-    #
-    # results = collection.query(**kwargs)
-    #
-    # The results dict has these keys (each a list-of-lists, one per query):
-    #   results["documents"][0]  → list[str]   — the chunk texts
-    #   results["metadatas"][0]  → list[dict]  — metadata for each chunk
-    #   results["distances"][0]  → list[float] — L2 distances (lower = more similar)
-    raise NotImplementedError(
-        "Implement collection.query() — see the TODO above (Step 2)."
-    )
+    results = collection.query(**kwargs)
 
-    # TODO (Feature 5, Step 3): convert distances to scores and build output.
-    #
-    # output = []
-    # for doc_text, meta, distance in zip(
-    #     results["documents"][0],
-    #     results["metadatas"][0],
-    #     results["distances"][0],
-    # ):
-    #     score = max(0.0, 1.0 - (distance / 2.0))  # flip: lower distance = higher score
-    #     output.append({
-    #         "text": doc_text,
-    #         "filename": meta.get("filename", ""),
-    #         "chunk_index": meta.get("chunk_index", 0),
-    #         "score": round(score, 4),
-    #         "document_id": meta.get("document_id", ""),
-    #     })
-    # return output
+    output = []
+    for doc_text, meta, distance in zip(
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0],
+    ):
+        score = max(0.0, 1.0 - (distance / 2.0))
+        output.append({
+            "text": doc_text,
+            "filename": meta.get("filename", ""),
+            "chunk_index": meta.get("chunk_index", 0),
+            "score": round(score, 4),
+            "document_id": meta.get("document_id", ""),
+        })
+
+    return output
+
+
+def delete_document_chunks(document_id: str) -> None:
+    """
+    Remove all vectors for a document from the collection.
+
+    Called automatically by DELETE /api/documents/{id} so the vector store
+    stays consistent with the document store — no orphaned vectors.
+    """
+    collection = get_collection()
+    if collection.count() == 0:
+        return
+    collection.delete(where={"document_id": document_id})
+
+
+def get_stats() -> dict:
+    """
+    Return aggregate statistics about the vector store.
+
+    Used by GET /api/search/stats.
+
+    Returns:
+      total_vectors:     total number of chunk vectors currently indexed
+      documents_indexed: number of distinct documents represented in the store
+      embedding_model:   the model name used to generate the embeddings
+    """
+    collection = get_collection()
+    total = collection.count()
+
+    if total == 0:
+        return {
+            "total_vectors": 0,
+            "documents_indexed": 0,
+            "embedding_model": EMBEDDING_MODEL_NAME,
+        }
+
+    all_items = collection.get(include=["metadatas"])
+    unique_doc_ids = {
+        m.get("document_id")
+        for m in all_items["metadatas"]
+        if m.get("document_id")
+    }
+
+    return {
+        "total_vectors": total,
+        "documents_indexed": len(unique_doc_ids),
+        "embedding_model": EMBEDDING_MODEL_NAME,
+    }

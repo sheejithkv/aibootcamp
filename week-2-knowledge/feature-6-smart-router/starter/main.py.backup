@@ -1,38 +1,19 @@
 """
-Feature 6: Smart Router — solution
+Feature 6: Smart Router — starter
 
-Adds an intelligence layer on top of Feature 5's semantic search. Instead of
-retrieving for every query, the Smart Router first CLASSIFIES the query, then
-decides whether to retrieve, use PageIndex, answer directly, or take a hybrid path.
+This file is identical to the Feature 5 solution EXCEPT:
+  1. It imports classify_query from the LOCAL router.py (your implementation).
+  2. It adds the POST /api/sessions/{id}/chat/smart endpoint with routing TODOs.
+  3. It adds the Part B and Part C endpoints (already wired — no changes needed).
 
-New endpoints vs Feature 5:
-  POST /api/chat/smart                  — the Smart Router chat endpoint
-  GET  /api/tenant/info                 — tenant identity (Part B)
-  GET  /api/retrieval-memory/recent     — recent retrieval log entries (Part C)
-  POST /api/retrieval-memory/rebuild    — rebuild knowledge digest (Part C)
-  GET  /api/retrieval-memory/digest     — get current knowledge digest (Part C)
-
-Updated endpoints vs Feature 5:
-  POST /api/sessions                    — now creates session with tenant_id (Part B)
-  POST /api/sessions/{id}/chat          — now stores session with tenant isolation (Part B)
-  POST /api/documents/upload            — now tags document with tenant_id (Part B)
-  GET  /api/documents                   — now filters by tenant (Part B)
-  DELETE /api/documents/{id}            — now enforces tenant ownership (Part B)
-
-All Feature 1-5 endpoints remain unchanged.
-
-ROUTING LOGIC:
-  confidence > 0.6 + needs_retrieval=True  → RAG (or PageIndex for professional docs)
-  confidence > 0.6 + needs_retrieval=False → LLM direct (no retrieval cost)
-  confidence 0.4–0.6                        → hybrid (retrieve but flag uncertainty)
+Your tasks are in router.py (Steps 1–3) and in smart_chat() below (Steps 4–6).
 
 Run with:
     uvicorn main:app --reload --port 8000
 
-Feature flags (in .env):
-    ENABLE_PAGEINDEX=true        — activate PageIndex routing for professional docs
-    ENABLE_MULTI_TENANT=true     — activate X-Tenant-ID header isolation (Part B)
-    ENABLE_LONG_TERM_CONTEXT=true — inject KnowledgeDigest into system prompt (Part C)
+The server will start even if router.py raises NotImplementedError — the /smart
+endpoint returns HTTP 501 with a hint until you implement it. All other endpoints
+(Feature 1-5) work immediately.
 """
 import json
 import sys
@@ -71,7 +52,6 @@ from shared.retrieval_memory import (
     get_recent_retrievals,
     log_retrieval,
 )
-from shared.router import classify_query
 from shared.session_store import add_message, create_session, get_session, list_sessions
 from shared.tenant_context import get_tenant_id
 from shared.vector_store import (
@@ -81,12 +61,14 @@ from shared.vector_store import (
     search as vector_search,
 )
 
+# Import YOUR implementation from the local router.py
+from router import classify_query
+
 CONTEXT_WINDOW_SIZE = 20
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Run startup checks before the server begins accepting requests."""
     await check_provider_config()
     yield
 
@@ -94,23 +76,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="My AI BlockSeBlock Assistant",
     description="Domain-Specific AI Assistant — AI Engineering Bootcamp, BlockseBlock",
-    version="6.0.0",
+    version="6.0.0-starter",
     lifespan=lifespan,
 )
 
 
 class ChatRequest(BaseModel):
-    """The body expected by plain/structured chat endpoints."""
     message: str
 
 
 class ChatResponse(BaseModel):
-    """The body returned by POST /api/chat (plain text mode)."""
     response: str
 
 
 class SessionSummary(BaseModel):
-    """A lightweight session descriptor for the sidebar list."""
     id: str
     created_at: str
     message_count: int
@@ -118,24 +97,21 @@ class SessionSummary(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """Body for POST /api/search."""
     query: str
     top_k: int = 5
     document_id: str | None = None
 
 
 class SmartChatRequest(BaseModel):
-    """Body for POST /api/chat/smart."""
     message: str
 
 
 # ---------------------------------------------------------------------------
-# Feature 1: Plain chat  (kept verbatim — convention #3)
+# Feature 1: Plain chat
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    """Send a message and get a plain-text reply (stateless — no history)."""
     messages = [
         {
             "role": "system",
@@ -152,7 +128,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 # ---------------------------------------------------------------------------
-# Feature 2: Structured chat  (kept verbatim — convention #3)
+# Feature 2: Structured chat
 # ---------------------------------------------------------------------------
 
 _STRUCTURED_SYSTEM_PROMPT = """You are a helpful AI assistant for [YOUR_DOMAIN].
@@ -183,7 +159,6 @@ Respond ONLY with the JSON object. No preamble, no explanation, no markdown fenc
 
 
 def _parse_structured(raw_text: str) -> StructuredResponse:
-    """Parse raw LLM text into a StructuredResponse, with a safe fallback."""
     try:
         return StructuredResponse(**json.loads(raw_text))
     except Exception:
@@ -197,7 +172,6 @@ def _parse_structured(raw_text: str) -> StructuredResponse:
 
 @app.post("/api/chat/structured", response_model=StructuredResponse)
 async def chat_structured(request: ChatRequest) -> StructuredResponse:
-    """Send a message and receive a structured response (stateless — no history)."""
     messages = [
         {"role": "system", "content": _STRUCTURED_SYSTEM_PROMPT},
         {"role": "user", "content": request.message},
@@ -207,19 +181,17 @@ async def chat_structured(request: ChatRequest) -> StructuredResponse:
 
 
 # ---------------------------------------------------------------------------
-# Feature 3: Session management  (updated — tenant-aware in Part B)
+# Feature 3: Session management
 # ---------------------------------------------------------------------------
 
 @app.post("/api/sessions")
 async def new_session(tenant_id: str = Depends(get_tenant_id)) -> dict:
-    """Start a new conversation session, tagged with the tenant (Part B)."""
     session_id = create_session(tenant_id=tenant_id)
     return {"session_id": session_id}
 
 
 @app.get("/api/sessions", response_model=list[SessionSummary])
 async def sessions_list() -> list[SessionSummary]:
-    """List all sessions, most recent first."""
     summaries = []
     for s in list_sessions():
         first_user_msg = next((m.content for m in s.messages if m.role == "user"), "")
@@ -239,7 +211,6 @@ async def session_chat(
     request: ChatRequest,
     tenant_id: str = Depends(get_tenant_id),
 ) -> StructuredResponse:
-    """Send a message within a session and get a structured reply."""
     session = get_session(session_id, tenant_id=tenant_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
@@ -264,7 +235,6 @@ async def session_history(
     session_id: str,
     tenant_id: str = Depends(get_tenant_id),
 ) -> list[Message]:
-    """Return the full message history for a session."""
     session = get_session(session_id, tenant_id=tenant_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
@@ -272,7 +242,7 @@ async def session_history(
 
 
 # ---------------------------------------------------------------------------
-# Feature 4: Document ingestion  (updated — tenant-aware in Part B)
+# Feature 4: Document ingestion
 # ---------------------------------------------------------------------------
 
 @app.post("/api/documents/upload", response_model=Document)
@@ -281,16 +251,6 @@ async def upload_document(
     strategy: str = Form("sentence"),
     tenant_id: str = Depends(get_tenant_id),
 ) -> Document:
-    """
-    Upload a document, extract text, chunk it, store chunks, and index vectors.
-
-    Tags the document with the tenant_id (Part B) so only this tenant can
-    retrieve it when ENABLE_MULTI_TENANT=true.
-
-    Form fields:
-      file     — the uploaded file (.txt, .pdf, .docx)
-      strategy — chunking strategy: "sentence" (default) or "paragraph"
-    """
     if strategy not in CHUNKING_STRATEGIES:
         raise HTTPException(
             status_code=400,
@@ -343,7 +303,6 @@ async def upload_document(
 
 @app.get("/api/documents", response_model=list[Document])
 async def documents_list(tenant_id: str = Depends(get_tenant_id)) -> list[Document]:
-    """List all uploaded documents for this tenant, most recently uploaded first."""
     return list_documents(tenant_id=tenant_id)
 
 
@@ -352,7 +311,6 @@ async def remove_document(
     doc_id: str,
     tenant_id: str = Depends(get_tenant_id),
 ) -> dict:
-    """Delete a document, its chunks, and its vectors. Enforces tenant ownership."""
     if get_document(doc_id, tenant_id=tenant_id) is None:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found.")
     delete_document_chunks(doc_id)
@@ -365,14 +323,13 @@ async def document_chunks(
     doc_id: str,
     tenant_id: str = Depends(get_tenant_id),
 ) -> list[Chunk]:
-    """Return all chunks for a document — useful for inspecting chunk quality."""
     if get_document(doc_id, tenant_id=tenant_id) is None:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found.")
     return get_chunks(doc_id)
 
 
 # ---------------------------------------------------------------------------
-# Feature 5: Semantic search  (updated — tenant-isolated search in Part B)
+# Feature 5: Semantic search
 # ---------------------------------------------------------------------------
 
 @app.post("/api/search")
@@ -380,24 +337,17 @@ async def search_documents(
     req: SearchRequest,
     tenant_id: str = Depends(get_tenant_id),
 ) -> list[dict]:
-    """
-    Semantic search across indexed document chunks for this tenant.
-
-    When ENABLE_MULTI_TENANT=true, only chunks belonging to this tenant
-    are returned — cross-tenant isolation is enforced at the vector DB level.
-    """
     filters = {"document_id": req.document_id} if req.document_id else None
     return vector_search(req.query, top_k=req.top_k, filters=filters, tenant_id=tenant_id)
 
 
 @app.get("/api/search/stats")
 async def search_stats() -> dict:
-    """Vector store statistics: total vectors, documents indexed, embedding model."""
     return vector_get_stats()
 
 
 # ---------------------------------------------------------------------------
-# Feature 6: Smart Router  (Part A — required)
+# Feature 6: Smart Router  (YOUR IMPLEMENTATION GOES HERE)
 # ---------------------------------------------------------------------------
 
 _SMART_SYSTEM_PROMPT = """You are a helpful AI assistant for [YOUR_DOMAIN].
@@ -407,8 +357,7 @@ If you don't know something, say so honestly rather than guessing."""
 _SMART_RAG_SYSTEM_PROMPT = """You are a helpful AI assistant for [YOUR_DOMAIN].
 You have been given relevant excerpts from documents to help answer the user's question.
 Use the provided context to give an accurate, grounded answer.
-If the context doesn't contain enough information, say so and answer from general knowledge where appropriate.
-Cite the source document when quoting directly."""
+If the context doesn't contain enough information, say so and answer from general knowledge where appropriate."""
 
 _SMART_HYBRID_SYSTEM_PROMPT = """You are a helpful AI assistant for [YOUR_DOMAIN].
 Some potentially relevant document excerpts have been retrieved for context, but their
@@ -417,7 +366,6 @@ Answer honestly and flag if you are uncertain."""
 
 
 def _build_context_block(chunks: list[dict]) -> str:
-    """Format retrieved chunks into a context block for the LLM prompt."""
     lines = ["--- RETRIEVED CONTEXT ---"]
     for i, chunk in enumerate(chunks, 1):
         lines.append(f"\n[{i}] From: {chunk.get('filename', 'unknown')} (chunk {chunk.get('chunk_index', 0)})")
@@ -433,15 +381,41 @@ async def smart_chat(
     tenant_id: str = Depends(get_tenant_id),
 ) -> SmartChatResponse:
     """
-    Smart Router chat — classifies the query before deciding how to answer.
+    Smart Router chat endpoint.
 
-    Routing paths:
-      confidence > 0.6 + needs_retrieval=True  → RAG (or PageIndex if enabled)
-      confidence > 0.6 + needs_retrieval=False → LLM direct (no retrieval)
-      confidence 0.4–0.6 (ambiguous)           → hybrid (retrieve + flag uncertainty)
+    STEP 4: Call classify_query(request.message) and capture the result.
+      classification = await classify_query(request.message)
+      needs_retrieval = classification["needs_retrieval"]
+      confidence = classification["confidence"]
+      query_type = classification["query_type"]
 
-    Part B: requests are scoped to tenant_id from X-Tenant-ID header.
-    Part C: injects KnowledgeDigest into system prompt when ENABLE_LONG_TERM_CONTEXT=true.
+    STEP 5: Route based on confidence and needs_retrieval:
+
+      HIGH CONFIDENCE (confidence > 0.6):
+        a. needs_retrieval=True + query_type=="professional_document" + settings.enable_pageindex
+             → PageIndex path (see shared/router.py PAGEINDEX_ROUTING comment)
+               source = "pageindex", retrieval_method = "pageindex"
+        b. needs_retrieval=True (vector RAG path)
+             → chunks_used = vector_search(request.message, top_k=5, tenant_id=tenant_id)
+               source = "rag", retrieval_method = "vector"
+        c. needs_retrieval=False (LLM direct path)
+             → no retrieval
+               source = "llm", retrieval_method = "none"
+
+      LOW CONFIDENCE (confidence <= 0.6) — HYBRID path:
+        → chunks_used = vector_search(request.message, top_k=3, tenant_id=tenant_id)
+          source = "hybrid", retrieval_method = "vector"
+
+    STEP 6: Generate the response.
+      a. Pick the right system prompt: _SMART_RAG_SYSTEM_PROMPT for rag/pageindex,
+         _SMART_HYBRID_SYSTEM_PROMPT for hybrid, _SMART_SYSTEM_PROMPT for llm.
+      b. If chunks_used is non-empty, append a context block as a system message.
+      c. Append the session history (last CONTEXT_WINDOW_SIZE messages).
+      d. Append the user message.
+      e. Call call_llm(messages) to generate the answer.
+      f. Call add_message() twice to store user and assistant turns.
+      g. Return SmartChatResponse(answer=..., source=..., chunks_used=...,
+                                   confidence=..., retrieval_method=...)
     """
     from shared.config import settings
 
@@ -449,120 +423,34 @@ async def smart_chat(
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
 
-    # --- Step 1: Classify the query (Anti-RAG pre-retrieval step) ---
-    classification = await classify_query(request.message)
-    needs_retrieval = classification["needs_retrieval"]
-    confidence = classification["confidence"]
-    query_type = classification["query_type"]
-
-    # --- Step 2: Route based on classification ---
-    chunks_used: list[dict] = []
-    source: str
-    retrieval_method: str = "none"
-    system_prompt: str
-
-    high_confidence = confidence > 0.6
-    low_confidence = confidence <= 0.6  # 0.4–0.6 range → hybrid
-
-    if high_confidence and needs_retrieval:
-        # RAG path — or PageIndex for professional documents
-        if query_type == "professional_document" and settings.enable_pageindex:
-            # PageIndex routing (ENABLE_PAGEINDEX=true required)
-            # PageIndex provides reasoning-based tree navigation instead of
-            # vector similarity — critical for financial/legal documents.
-            # Integration: pip install pageindex (github.com/VectifyAI/PageIndex)
-            #
-            # from pageindex import PageIndex
-            # pi = PageIndex.load(tree_json_path)
-            # result = pi.retrieve(request.message)
-            # chunks_used = [{"text": result.text, "filename": result.source,
-            #                  "chunk_index": 0, "score": 1.0, "document_id": ""}]
-            source = "pageindex"
-            retrieval_method = "pageindex"
-            # Fallback: use vector search if PageIndex is not fully configured
-            chunks_used = vector_search(request.message, top_k=5, tenant_id=tenant_id)
-        else:
-            chunks_used = vector_search(request.message, top_k=5, tenant_id=tenant_id)
-            source = "rag"
-            retrieval_method = "vector"
-        system_prompt = _SMART_RAG_SYSTEM_PROMPT
-
-    elif high_confidence and not needs_retrieval:
-        # LLM direct path — answer without retrieval
-        source = "llm"
-        retrieval_method = "none"
-        system_prompt = _SMART_SYSTEM_PROMPT
-
-    else:
-        # Hybrid path — confidence 0.4–0.6: retrieve but flag uncertainty
-        chunks_used = vector_search(request.message, top_k=3, tenant_id=tenant_id)
-        source = "hybrid"
-        retrieval_method = "vector"
-        system_prompt = _SMART_HYBRID_SYSTEM_PROMPT
-
-    # --- Step 3: Optionally inject KnowledgeDigest (Part C) ---
-    if settings.enable_long_term_context:
-        digest = get_current_digest(tenant_id)
-        if digest and digest.summary:
-            system_prompt += f"\n\nContext about this user's history: {digest.summary}"
-
-    # --- Step 4: Build message list with session history ---
-    messages: list[dict] = [{"role": "system", "content": system_prompt}]
-
-    if chunks_used:
-        context_block = _build_context_block(chunks_used)
-        messages.append({"role": "system", "content": context_block})
-
-    history = session.messages[-CONTEXT_WINDOW_SIZE:]
-    for msg in history:
-        messages.append({"role": msg.role, "content": msg.content})
-    messages.append({"role": "user", "content": request.message})
-
-    # --- Step 5: Generate the response ---
-    result = await call_llm(messages)
-    answer = result.content or ""
-
-    # --- Step 6: Persist the exchange to session history ---
-    add_message(session_id, "user", request.message)
-    add_message(session_id, "assistant", answer)
-
-    # --- Step 7: Log retrieval event for Part C long-term memory ---
-    if chunks_used and settings.enable_long_term_context:
-        chunk_ids = [
-            f"{c.get('document_id', '')}_{c.get('chunk_index', 0)}"
-            for c in chunks_used
-        ]
-        log_retrieval(
-            session_id=session_id,
-            tenant_id=tenant_id,
-            query=request.message,
-            chunk_ids=chunk_ids,
-            retrieval_method=retrieval_method,
+    try:
+        # ============================================================
+        # TODO STEP 4–6: implement the routing logic described above.
+        # The hints in the docstring walk you through each branch.
+        # ============================================================
+        raise NotImplementedError(
+            "TODO: implement the Smart Router routing logic. "
+            "Read the docstring above — it describes every branch with variable names."
         )
 
-    return SmartChatResponse(
-        answer=answer,
-        source=source,  # type: ignore[arg-type]
-        chunks_used=chunks_used,
-        confidence=confidence,
-        retrieval_method=retrieval_method,
-    )
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "smart_chat is not yet implemented. "
+                "Open starter/router.py and implement classify_query() (Steps 1–3), "
+                "then return here to implement the routing branches (Steps 4–6)."
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
-# Feature 6: Tenant info  (Part B — optional)
+# Feature 6: Tenant info  (Part B)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/tenant/info")
 async def tenant_info(tenant_id: str = Depends(get_tenant_id)) -> dict:
-    """
-    Return the active tenant identity and multi-tenant mode status.
-
-    Useful for the UI Admin panel to show which tenant's data is visible
-    and to confirm that the X-Tenant-ID header is being read correctly.
-    """
     from shared.config import settings
-
     docs = list_documents(tenant_id=tenant_id)
     return {
         "tenant_id": tenant_id,
@@ -572,7 +460,7 @@ async def tenant_info(tenant_id: str = Depends(get_tenant_id)) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Feature 6: Retrieval memory  (Part C — optional)
+# Feature 6: Retrieval memory  (Part C — already wired, no changes needed)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/retrieval-memory/recent")
@@ -580,13 +468,6 @@ async def retrieval_memory_recent(
     limit: int = 20,
     tenant_id: str = Depends(get_tenant_id),
 ) -> list[dict]:
-    """
-    Return the most recent retrieval log entries for this tenant.
-
-    Each entry records: session_id, query, chunk_ids retrieved, timestamp,
-    and retrieval_method. Together these entries form the raw material for
-    build_knowledge_digest().
-    """
     entries = get_recent_retrievals(tenant_id=tenant_id, limit=limit)
     return [
         {
@@ -601,18 +482,7 @@ async def retrieval_memory_recent(
 
 
 @app.post("/api/retrieval-memory/rebuild")
-async def retrieval_memory_rebuild(
-    tenant_id: str = Depends(get_tenant_id),
-) -> dict:
-    """
-    Rebuild the KnowledgeDigest from this tenant's retrieval history.
-
-    Makes one LLM call to summarize the recent retrieval patterns into a
-    2-3 sentence digest. The result is cached in memory and injected into
-    the Smart Router's system prompt on subsequent requests.
-
-    Returns the digest summary, topics, and how many sessions it covers.
-    """
+async def retrieval_memory_rebuild(tenant_id: str = Depends(get_tenant_id)) -> dict:
     digest = await build_knowledge_digest(tenant_id=tenant_id)
     if digest is None:
         return {"message": "No retrieval history found for this tenant — upload documents and ask questions first."}
@@ -625,15 +495,7 @@ async def retrieval_memory_rebuild(
 
 
 @app.get("/api/retrieval-memory/digest")
-async def retrieval_memory_digest(
-    tenant_id: str = Depends(get_tenant_id),
-) -> dict:
-    """
-    Return the current cached KnowledgeDigest for this tenant.
-
-    Returns a 404-style response (not an HTTP error) if no digest has been
-    built yet — call POST /api/retrieval-memory/rebuild first.
-    """
+async def retrieval_memory_digest(tenant_id: str = Depends(get_tenant_id)) -> dict:
     digest = get_current_digest(tenant_id=tenant_id)
     if digest is None:
         return {"message": "No digest built yet. Call POST /api/retrieval-memory/rebuild first."}
@@ -651,13 +513,11 @@ async def retrieval_memory_digest(
 
 @app.get("/api/health")
 async def health():
-    """Quick liveness check — returns 200 OK if the server is running."""
     return {"status": "ok"}
 
 
 @app.get("/api/provider-info")
 async def provider_info():
-    """Return which LLM and voice provider are currently active (no API keys)."""
     from shared.config import settings
 
     voice_name = settings.effective_voice_provider().lower().strip()
