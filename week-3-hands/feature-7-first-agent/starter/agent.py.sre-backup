@@ -18,27 +18,27 @@ from typing import Any
 from shared.llm_client import call_llm
 from shared.session_store import add_message, get_session
 from shared.tools import (
-    CHECK_CLUSTER_HEALTH_SCHEMA,
-    CREATE_INCIDENT_SCHEMA,
-    LOOKUP_RUNBOOK_SCHEMA,
-    check_cluster_health,
-    create_incident,
-    lookup_runbook,
+    CHECK_AVAILABILITY_SCHEMA,
+    CREATE_TICKET_SCHEMA,
+    LOOKUP_INFO_SCHEMA,
+    check_availability,
+    create_ticket,
+    lookup_info,
 )
 
 
 TOOLS_REGISTRY: dict[str, tuple[Any, dict]] = {
-    "check_cluster_health": (
-        check_cluster_health,
-        CHECK_CLUSTER_HEALTH_SCHEMA,
+    "check_availability": (
+        check_availability,
+        CHECK_AVAILABILITY_SCHEMA,
     ),
-    "lookup_runbook": (
-        lookup_runbook,
-        LOOKUP_RUNBOOK_SCHEMA,
+    "create_ticket": (
+        create_ticket,
+        CREATE_TICKET_SCHEMA,
     ),
-    "create_incident": (
-        create_incident,
-        CREATE_INCIDENT_SCHEMA,
+    "lookup_info": (
+        lookup_info,
+        LOOKUP_INFO_SCHEMA,
     ),
 }
 
@@ -49,25 +49,22 @@ _TOOL_SCHEMAS = [
 
 
 _AGENT_SYSTEM_PROMPT = """
-You are an OpenShift and Kubernetes SRE assistant.
+You are a helpful AI assistant.
 
 You have access to tools that can:
-- check cluster health and node readiness
-- retrieve troubleshooting runbooks
-- create mock SRE incidents
+- check availability
+- create support tickets
+- look up factual information
 
-Use a tool whenever the user's request requires current operational data,
-a stored runbook, or an explicit operational action.
+Use a tool when the user's request requires information or an action
+provided by that tool.
 
-Do not invent cluster status, runbook results, or incident IDs.
+Do not invent tool results.
 
-Use create_incident only when the user explicitly asks to create, raise,
-open, or log an incident.
+When a tool is used, wait for the tool result and then provide a clear
+natural-language response.
 
-If the user asks a general technical question that does not require one of
-the available tools, answer directly without calling a tool.
-
-After receiving a tool result, summarize it clearly and concisely.
+If no tool is required, answer directly.
 """.strip()
 
 

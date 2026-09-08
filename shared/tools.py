@@ -1,257 +1,297 @@
 """
-Example tools for Feature 7: First Agent.
+OpenShift / Kubernetes SRE tools for Feature 7: First Agent.
 
-These three tools represent generic domain actions — a support ticket system,
-an availability checker, and a knowledge base lookup. They use mock/hardcoded
-data so the agent loop works immediately, without any external API calls.
-
-YOUR TASK:
-  Replace these three functions (and their schemas) with tools relevant to
-  your own domain. Keep the same pattern:
-    1. A plain Python function that takes typed arguments and returns a dict.
-    2. A TOOL_SCHEMA dict alongside it in OpenAI function-calling format.
-    3. A registration entry in shared/agent.py's TOOLS_REGISTRY.
-
-WHAT MAKES A GOOD TOOL:
-  - One action per tool (small, focused scope)
-  - Clear description — the LLM reads this to decide when to call it
-  - ≤4 parameters — more parameters confuse the LLM's argument generation
-  - Returns a flat dict — easier for the LLM to summarize in natural language
-  - Never raises exceptions — return {"error": "..."} instead so the agent
-    can incorporate the failure into its response
-
-DEEPAGENT NOTE (WWW 2026):
-  This pre-registered tool registry is the foundation of most production agents.
-  The research frontier (e.g., DeepAgent, WWW 2026, github.com/RUC-NLPIR/DeepAgent)
-  replaces this with dynamic tool discovery from large tool libraries — the agent
-  searches for tools it needs from 16,000+ RapidAPIs within its reasoning process,
-  rather than using only pre-registered ones. If you're curious where tool-calling
-  agents are heading, start there.
+These tools use deterministic mock data so the agent can demonstrate
+tool selection and execution without requiring access to a real cluster,
+monitoring platform, or incident-management system.
 """
-import random
+
 import uuid
 
 
 # =============================================================================
-# Tool 1: Availability check
+# Tool 1: Cluster health
 # =============================================================================
 
-def check_availability(date: str, time: str) -> dict:
-    """
-    Check whether an appointment slot is available on the given date and time.
+_CLUSTER_HEALTH = {
+    "prod-ocp": {
+        "status": "degraded",
+        "ready_nodes": 6,
+        "total_nodes": 7,
+        "issue": "worker-3 is NotReady",
+    },
+    "dev-ocp": {
+        "status": "healthy",
+        "ready_nodes": 4,
+        "total_nodes": 4,
+        "issue": "none",
+    },
+    "qa-ocp": {
+        "status": "healthy",
+        "ready_nodes": 5,
+        "total_nodes": 5,
+        "issue": "none",
+    },
+}
 
-    Returns a dict indicating availability, and if available, a booking
-    reference the caller can use to confirm.
+
+def check_cluster_health(
+    cluster: str,
+    namespace: str = "all",
+) -> dict:
+    """
+    Check the current health of an OpenShift or Kubernetes cluster.
 
     Args:
-        date: Date string in any common format (e.g. "2024-01-15", "next Monday").
-        time: Time string (e.g. "10:00 AM", "14:30", "afternoon").
+        cluster: Cluster name, for example "prod-ocp".
+        namespace: Namespace to focus on, or "all".
 
     Returns:
-        {"available": bool, "date": str, "time": str, "booking_ref": str | None}
+        A flat dictionary describing cluster health.
     """
-    # Mock implementation — replace with a real calendar API call.
-    is_available = random.choice([True, True, True, False])  # 75% available
+    key = cluster.lower().strip()
+
+    result = _CLUSTER_HEALTH.get(
+        key,
+        {
+            "status": "unknown",
+            "ready_nodes": 0,
+            "total_nodes": 0,
+            "issue": "cluster is not present in the mock inventory",
+        },
+    )
+
     return {
-        "available": is_available,
-        "date": date,
-        "time": time,
-        "booking_ref": f"REF-{uuid.uuid4().hex[:6].upper()}" if is_available else None,
-        "next_available": "tomorrow at 2:00 PM" if not is_available else None,
+        "cluster": cluster,
+        "namespace": namespace,
+        "status": result["status"],
+        "ready_nodes": result["ready_nodes"],
+        "total_nodes": result["total_nodes"],
+        "issue": result["issue"],
     }
 
 
-CHECK_AVAILABILITY_SCHEMA = {
+CHECK_CLUSTER_HEALTH_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "check_availability",
+        "name": "check_cluster_health",
         "description": (
-            "Check whether an appointment or booking slot is available on a given date and time. "
-            "Use this when the user asks about scheduling, bookings, appointments, or availability. "
-            "Returns whether the slot is open and a booking reference if it is."
+            "Check the health and node readiness of an OpenShift or Kubernetes cluster. "
+            "Call this when the user asks whether a cluster is healthy, degraded, "
+            "available, has NotReady nodes, or asks for current cluster status."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "date": {
+                "cluster": {
                     "type": "string",
-                    "description": "The date to check, e.g. '2024-01-15', 'next Monday', 'tomorrow'.",
+                    "description": (
+                        "The cluster name to inspect, for example "
+                        "'prod-ocp', 'dev-ocp', or 'qa-ocp'."
+                    ),
                 },
-                "time": {
+                "namespace": {
                     "type": "string",
-                    "description": "The time to check, e.g. '10:00 AM', '2:30 PM', 'morning', 'afternoon'.",
+                    "description": (
+                        "Optional namespace to focus on. "
+                        "Use 'all' when no namespace is specified."
+                    ),
                 },
             },
-            "required": ["date", "time"],
+            "required": ["cluster"],
         },
     },
 }
 
 
 # =============================================================================
-# Tool 2: Support ticket creation
+# Tool 2: Runbook lookup
 # =============================================================================
 
-def create_ticket(subject: str, description: str, priority: str = "normal") -> dict:
+_RUNBOOKS = {
+    "etcd": {
+        "runbook_id": "RB-ETCD-001",
+        "summary": "Investigate etcd health, endpoint latency, database size, and member status.",
+        "first_action": "Check etcd operator and member health before taking corrective action.",
+    },
+    "disk pressure": {
+        "runbook_id": "RB-NODE-002",
+        "summary": "Investigate node filesystem usage, image filesystem usage, and eviction signals.",
+        "first_action": "Identify the filesystem causing DiskPressure and confirm current usage.",
+    },
+    "crashloop": {
+        "runbook_id": "RB-POD-003",
+        "summary": "Investigate pod restart history, previous container logs, events, and probes.",
+        "first_action": "Inspect pod events and previous container logs to identify the first failure.",
+    },
+    "certificate": {
+        "runbook_id": "RB-CERT-004",
+        "summary": "Investigate certificate expiry, issuer status, and certificate consumers.",
+        "first_action": "Identify the expiring certificate and verify its issuer and renewal path.",
+    },
+}
+
+
+def lookup_runbook(alert: str) -> dict:
     """
-    Create a support ticket and return its ID and estimated response time.
+    Look up an SRE runbook for an OpenShift or Kubernetes alert or symptom.
 
     Args:
-        subject: One-line summary of the issue.
-        description: Detailed description of the problem or request.
-        priority: Urgency level — "low", "normal", or "high". Defaults to "normal".
+        alert: Alert, symptom, or issue such as "etcd", "DiskPressure",
+               "CrashLoopBackOff", or "certificate expiry".
 
     Returns:
-        {"ticket_id": str, "subject": str, "priority": str,
-         "status": str, "estimated_response": str}
+        A flat dictionary containing runbook information.
     """
-    # Mock implementation — replace with a real ticketing API call (Zendesk, Jira, etc.).
-    valid_priorities = {"low", "normal", "high"}
-    if priority not in valid_priorities:
-        priority = "normal"
+    normalized = alert.lower().strip()
 
-    response_times = {
-        "low": "3–5 business days",
-        "normal": "1–2 business days",
-        "high": "within 4 hours",
+    aliases = {
+        "diskpressure": "disk pressure",
+        "disk_pressure": "disk pressure",
+        "crashloopbackoff": "crashloop",
+        "crash loop": "crashloop",
+        "cert": "certificate",
+        "certificate expiry": "certificate",
+        "certificate expiration": "certificate",
     }
 
-    ticket_id = f"TKT-{uuid.uuid4().hex[:8].upper()}"
+    normalized = aliases.get(normalized, normalized)
+
+    match = None
+
+    for key, value in _RUNBOOKS.items():
+        if key in normalized or normalized in key:
+            match = value
+            break
+
+    if match is None:
+        return {
+            "found": False,
+            "alert": alert,
+            "runbook_id": "none",
+            "summary": "No matching runbook was found.",
+            "first_action": "Collect cluster events, logs, metrics, and affected-resource status.",
+        }
+
     return {
-        "ticket_id": ticket_id,
-        "subject": subject,
-        "priority": priority,
+        "found": True,
+        "alert": alert,
+        "runbook_id": match["runbook_id"],
+        "summary": match["summary"],
+        "first_action": match["first_action"],
+    }
+
+
+LOOKUP_RUNBOOK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "lookup_runbook",
+        "description": (
+            "Look up an OpenShift or Kubernetes SRE troubleshooting runbook. "
+            "Call this when the user asks how to investigate, troubleshoot, or respond "
+            "to an alert or symptom such as etcd problems, DiskPressure, "
+            "CrashLoopBackOff, or certificate expiry."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "alert": {
+                    "type": "string",
+                    "description": (
+                        "The alert, symptom, or issue to investigate, for example "
+                        "'DiskPressure', 'CrashLoopBackOff', 'etcd', or 'certificate expiry'."
+                    ),
+                },
+            },
+            "required": ["alert"],
+        },
+    },
+}
+
+
+# =============================================================================
+# Tool 3: Incident creation
+# =============================================================================
+
+def create_incident(
+    cluster: str,
+    summary: str,
+    severity: str = "medium",
+) -> dict:
+    """
+    Create a mock SRE incident for a cluster issue.
+
+    Args:
+        cluster: Affected cluster name.
+        summary: Short description of the problem.
+        severity: low, medium, high, or critical.
+
+    Returns:
+        A flat dictionary describing the created incident.
+    """
+    valid_severities = {
+        "low",
+        "medium",
+        "high",
+        "critical",
+    }
+
+    severity = severity.lower().strip()
+
+    if severity not in valid_severities:
+        severity = "medium"
+
+    incident_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+
+    return {
+        "incident_id": incident_id,
+        "cluster": cluster,
+        "summary": summary,
+        "severity": severity,
         "status": "open",
-        "estimated_response": response_times[priority],
-        "confirmation": f"Your ticket {ticket_id} has been created successfully.",
+        "assignment_group": "platform-sre",
     }
 
 
-CREATE_TICKET_SCHEMA = {
+CREATE_INCIDENT_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "create_ticket",
+        "name": "create_incident",
         "description": (
-            "Create a support ticket for an issue, complaint, or request. "
-            "Use this when the user reports a problem, asks for help with a specific issue, "
-            "or requests something that requires follow-up action from the team. "
-            "Returns a ticket ID and estimated response time."
+            "Create an SRE incident for an OpenShift or Kubernetes cluster problem. "
+            "Call this only when the user explicitly asks to create, open, raise, "
+            "or log an incident or ticket for a cluster issue."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "subject": {
+                "cluster": {
                     "type": "string",
-                    "description": "A short one-line summary of the issue or request.",
+                    "description": "The affected cluster name.",
                 },
-                "description": {
+                "summary": {
                     "type": "string",
-                    "description": "A detailed description of the issue, including relevant context.",
+                    "description": "A concise summary of the cluster problem.",
                 },
-                "priority": {
+                "severity": {
                     "type": "string",
-                    "enum": ["low", "normal", "high"],
+                    "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "critical",
+                    ],
                     "description": (
-                        "Urgency level. Use 'high' for urgent issues (service outage, data loss, "
-                        "blocking a deadline). Use 'low' for general questions or nice-to-haves. "
-                        "Default 'normal' for everything else."
+                        "Incident severity. Use critical for complete production outages, "
+                        "high for major degradation, medium for normal operational issues, "
+                        "and low for minor issues."
                     ),
                 },
             },
-            "required": ["subject", "description"],
-        },
-    },
-}
-
-
-# =============================================================================
-# Tool 3: Information lookup
-# =============================================================================
-
-_INFO_KNOWLEDGE_BASE = {
-    "hours": {
-        "topic": "hours",
-        "answer": "We are open Monday–Friday 9:00 AM to 6:00 PM, and Saturday 10:00 AM to 4:00 PM. We are closed on Sundays and public holidays.",
-        "last_updated": "2024-01-01",
-    },
-    "pricing": {
-        "topic": "pricing",
-        "answer": "Pricing depends on the service. Basic plan: $29/month. Pro plan: $79/month. Enterprise: custom pricing. All plans include a 14-day free trial.",
-        "last_updated": "2024-01-01",
-    },
-    "policy": {
-        "topic": "policy",
-        "answer": "Refunds are available within 30 days of purchase. Cancellations can be made at any time; you will retain access until the end of your billing period.",
-        "last_updated": "2024-01-01",
-    },
-    "shipping": {
-        "topic": "shipping",
-        "answer": "Standard shipping takes 5–7 business days. Express shipping (2–3 days) is available at an additional cost. Free shipping on orders over $50.",
-        "last_updated": "2024-01-01",
-    },
-    "contact": {
-        "topic": "contact",
-        "answer": "You can reach us at support@example.com, or call 1-800-555-0100 during business hours. Live chat is available on the website.",
-        "last_updated": "2024-01-01",
-    },
-}
-
-
-def lookup_info(topic: str) -> dict:
-    """
-    Look up factual information about a topic from the organization's knowledge base.
-
-    Covers common topics like hours, pricing, policies, shipping, and contact details.
-    Returns "not found" if the topic isn't in the knowledge base.
-
-    Args:
-        topic: The topic to look up. Supported: "hours", "pricing", "policy",
-               "shipping", "contact".
-
-    Returns:
-        {"topic": str, "answer": str, "found": bool}
-    """
-    # Normalize the topic — strip whitespace, lowercase, handle plurals.
-    normalized = topic.lower().strip().rstrip("s")  # "policies" -> "polic" won't match, handled below
-    # Try direct match first, then check if any key starts with the normalized topic.
-    result = _INFO_KNOWLEDGE_BASE.get(normalized)
-    if result is None:
-        for key, val in _INFO_KNOWLEDGE_BASE.items():
-            if key.startswith(normalized) or normalized.startswith(key):
-                result = val
-                break
-
-    if result:
-        return {"found": True, **result}
-    return {
-        "found": False,
-        "topic": topic,
-        "answer": f"I don't have specific information about '{topic}' in my knowledge base. Try asking about: hours, pricing, policy, shipping, or contact.",
-    }
-
-
-LOOKUP_INFO_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "lookup_info",
-        "description": (
-            "Look up factual information about the organization — such as business hours, "
-            "pricing plans, refund and cancellation policies, shipping times, or contact details. "
-            "Use this when the user asks a specific factual question that has a definitive answer "
-            "stored in the knowledge base. Supported topics: hours, pricing, policy, shipping, contact."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "topic": {
-                    "type": "string",
-                    "description": (
-                        "The topic to look up. One of: 'hours', 'pricing', 'policy', "
-                        "'shipping', 'contact'. Use the closest matching topic."
-                    ),
-                },
-            },
-            "required": ["topic"],
+            "required": [
+                "cluster",
+                "summary",
+            ],
         },
     },
 }
