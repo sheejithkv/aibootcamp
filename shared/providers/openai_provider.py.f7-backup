@@ -69,31 +69,15 @@ class OpenAIProvider(LLMProvider):
         normalized_tool_calls: list[dict] = []
         if message.tool_calls:
             for tc in message.tool_calls:
-                # Preserve provider-specific metadata such as Gemini's
-                # thought_signature. Gemini requires this metadata to be
-                # returned unchanged with the function call on the next turn.
-                tc_dump = tc.model_dump()
-
-                normalized = {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    # arguments arrives as a JSON string — parse it to a dict
-                    # so callers don't have to remember this quirk.
-                    "arguments": json.loads(tc.function.arguments),
-                }
-
-                extra_content = tc_dump.get("extra_content")
-
-                # Some OpenAI SDK versions expose unknown provider-specific
-                # fields through model_extra rather than model_dump().
-                if not extra_content:
-                    model_extra = getattr(tc, "model_extra", None) or {}
-                    extra_content = model_extra.get("extra_content")
-
-                if extra_content:
-                    normalized["extra_content"] = extra_content
-
-                normalized_tool_calls.append(normalized)
+                normalized_tool_calls.append(
+                    {
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        # arguments arrives as a JSON string — parse it to a dict
+                        # so callers don't have to remember this quirk.
+                        "arguments": json.loads(tc.function.arguments),
+                    }
+                )
 
         return LLMResponse(
             content=message.content,
