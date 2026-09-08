@@ -44,12 +44,12 @@ from typing import Any
 from shared.llm_client import call_llm
 from shared.session_store import add_message, get_session
 from shared.tools import (
-    CHECK_CLUSTER_HEALTH_SCHEMA,
-    CREATE_INCIDENT_SCHEMA,
-    LOOKUP_RUNBOOK_SCHEMA,
-    check_cluster_health,
-    create_incident,
-    lookup_runbook,
+    CHECK_AVAILABILITY_SCHEMA,
+    CREATE_TICKET_SCHEMA,
+    LOOKUP_INFO_SCHEMA,
+    check_availability,
+    create_ticket,
+    lookup_info,
 )
 
 # =============================================================================
@@ -65,41 +65,22 @@ from shared.tools import (
 # =============================================================================
 
 TOOLS_REGISTRY: dict[str, tuple[Any, dict]] = {
-    "check_cluster_health": (
-        check_cluster_health,
-        CHECK_CLUSTER_HEALTH_SCHEMA,
-    ),
-    "lookup_runbook": (
-        lookup_runbook,
-        LOOKUP_RUNBOOK_SCHEMA,
-    ),
-    "create_incident": (
-        create_incident,
-        CREATE_INCIDENT_SCHEMA,
-    ),
+    "check_availability": (check_availability, CHECK_AVAILABILITY_SCHEMA),
+    "create_ticket":      (create_ticket, CREATE_TICKET_SCHEMA),
+    "lookup_info":        (lookup_info, LOOKUP_INFO_SCHEMA),
 }
 
 # Extract just the schemas for the LLM call (TOOLS_REGISTRY holds both fn + schema).
 _TOOL_SCHEMAS = [schema for _, schema in TOOLS_REGISTRY.values()]
 
-_AGENT_SYSTEM_PROMPT = """You are an OpenShift and Kubernetes SRE assistant.
+_AGENT_SYSTEM_PROMPT = """You are a helpful AI assistant for [YOUR_DOMAIN].
+You have access to tools that can check availability, create support tickets,
+and look up factual information. Use these tools whenever the user's request
+would benefit from real data — don't guess at facts you could look up.
 
-You have access to tools that can:
-- check cluster health and node readiness
-- retrieve troubleshooting runbooks
-- create mock SRE incidents
-
-Use a tool whenever the user's request requires information or an action
-provided by one of these tools.
-
-Do not invent cluster status, runbook results, or incident IDs.
-
-Use create_incident only when the user explicitly asks to create, open,
-raise, or log an incident.
-
-If no tool is needed, answer directly.
-
-When a tool is used, wait for the result and summarize it clearly."""
+When you use a tool, wait for its result before responding. Synthesize the
+tool results into a clear, helpful answer in plain English.
+If a tool fails, acknowledge it and offer alternatives."""
 
 
 async def run_agent(
@@ -167,31 +148,22 @@ async def run_agent(
 
     # We need to append the assistant's tool-call message to maintain conversation
     # context. Build it in OpenAI format (the second call expects this structure).
-    assistant_tool_calls = []
-
-    for tc in first_response.tool_calls:
-        tool_call = {
-            "id": tc["id"],
-            "type": "function",
-            "function": {
-                "name": tc["name"],
-                "arguments": json.dumps(tc["arguments"]),
-            },
-        }
-
-        # Gemini requires provider metadata such as thought_signature
-        # to be preserved unchanged for the follow-up request.
-        if tc.get("extra_content"):
-            tool_call["extra_content"] = tc["extra_content"]
-
-        assistant_tool_calls.append(tool_call)
-
     tool_call_message: dict = {
         "role": "assistant",
-        "content": first_response.content,
-        "tool_calls": assistant_tool_calls,
+        "content": first_response.content,  # may be None
+        "tool_calls": [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    # arguments must be a JSON string in the OpenAI format
+                    "arguments": json.dumps(tc["arguments"]),
+                },
+            }
+            for tc in first_response.tool_calls
+        ],
     }
-
     messages.append(tool_call_message)
 
     # Execute each tool and append results as "tool" role messages.
