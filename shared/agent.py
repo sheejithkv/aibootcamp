@@ -303,13 +303,29 @@ async def run_agent_with_mcp(
         return {"result": answer, "steps": [], "tools_used": []}
 
     # Append the assistant's tool-call decision message.
+    assistant_tool_calls = []
+
+    for tc in first_response.tool_calls:
+        tool_call = {
+            "id": tc["id"],
+            "type": "function",
+            "function": {
+                "name": tc["name"],
+                "arguments": json.dumps(tc["arguments"]),
+            },
+        }
+
+        # Gemini requires provider-specific thought_signature metadata
+        # to be returned unchanged on the follow-up request.
+        if tc.get("extra_content"):
+            tool_call["extra_content"] = tc["extra_content"]
+
+        assistant_tool_calls.append(tool_call)
+
     messages.append({
         "role": "assistant",
         "content": first_response.content,
-        "tool_calls": [
-            {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])}}
-            for tc in first_response.tool_calls
-        ],
+        "tool_calls": assistant_tool_calls,
     })
 
     # Execute each tool — local or MCP.
