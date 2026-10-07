@@ -478,15 +478,11 @@ async def voice_transcribe(audio: UploadFile = File(...)) -> dict:
 
     transcribe_audio() is in shared/llm_client.py — it uses VOICE_PROVIDER from .env.
     """
-    audio_bytes = await audio.read()
-    text = await transcribe_audio(
-        audio_bytes,
-        audio.filename or "audio.webm",
-    )
-    return {
-        "text": text,
-        "filename": audio.filename,
-    }
+    # TODO 1: implement STT transcription
+    # audio_bytes = await audio.read()
+    # text = await transcribe_audio(audio_bytes, audio.filename or "audio.webm")
+    # return {"text": text, "filename": audio.filename}
+    raise HTTPException(status_code=501, detail="TODO 1: implement voice_transcribe (see comments above)")
 
 
 @app.post("/api/voice/chat", response_model=VoiceChatResponse, tags=["F10 · Multimodal AI"])
@@ -512,66 +508,8 @@ async def voice_chat(
 
     See solution/main.py for the full implementation.
     """
-    # Stage 2: Speech-to-Text
-    audio_bytes = await audio.read()
-    transcript = await transcribe_audio(
-        audio_bytes,
-        audio.filename or "audio.webm",
-    )
-
-    # Stage 3: text answer
-    if session_id:
-        session = get_session(session_id, tenant_id=tenant_id)
-
-        if session:
-            smart_resp = await smart_chat(
-                session_id,
-                SmartChatRequest(message=transcript),
-                tenant_id,
-            )
-            answer = smart_resp.answer
-        else:
-            result = await call_llm([
-                {
-                    "role": "system",
-                    "content": _SMART_SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": transcript,
-                },
-            ])
-            answer = result.content or ""
-    else:
-        result = await call_llm([
-            {
-                "role": "system",
-                "content": _SMART_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": transcript,
-            },
-        ])
-        answer = result.content or ""
-
-    # Stage 4: Text-to-Speech
-    #
-    # Some voice providers, such as Groq, support STT but not TTS.
-    # In that case Feature 10 still returns transcript + text answer.
-    audio_base64 = ""
-
-    try:
-        audio_out = await synthesize_speech(answer)
-        audio_base64 = base64.b64encode(audio_out).decode()
-    except NotImplementedError:
-        pass
-
-    return VoiceChatResponse(
-        transcript=transcript,
-        answer=answer,
-        audio_base64=audio_base64,
-    )
+    # TODO 2: implement the full voice pipeline
+    raise HTTPException(status_code=501, detail="TODO 2: implement voice_chat (see comments above)")
 
 
 # ---------------------------------------------------------------------------
@@ -595,18 +533,11 @@ async def vision_analyze(
     analyze_image() is in shared/llm_client.py — it uses VLM_PROVIDER from .env.
     detail controls resolution: "auto" (default), "high" (fine text), "low" (fast).
     """
-    image_bytes = await image.read()
-
-    result = await analyze_image(
-        image_bytes,
-        prompt,
-        detail,
-    )
-
-    return VisionAnalyzeResponse(
-        answer=result.content or "",
-        model_used=result.model,
-    )
+    # TODO 3: implement vision analysis
+    # image_bytes = await image.read()
+    # result = await analyze_image(image_bytes, prompt, detail)
+    # return VisionAnalyzeResponse(answer=result.content or "", model_used=result.model)
+    raise HTTPException(status_code=501, detail="TODO 3: implement vision_analyze (see comments above)")
 
 
 @app.post("/api/vision/chat", response_model=VisionAnalyzeResponse, tags=["F10 · Multimodal AI"])
@@ -668,89 +599,30 @@ async def multimodal_chat(
     modality = detect_modality(has_audio=has_audio, has_image=has_image)
 
     if modality == "voice":
-        if audio is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Voice modality selected but no audio file was provided.",
-            )
-
-        audio_bytes = await audio.read()
-
-        transcript = await transcribe_audio(
-            audio_bytes,
-            audio.filename or "audio.webm",
-        )
-
-        smart_resp = await smart_chat(
-            session_id,
-            SmartChatRequest(message=transcript),
-            tenant_id,
-        )
-
-        audio_base64 = ""
-
-        try:
-            audio_out = await synthesize_speech(smart_resp.answer)
-            audio_base64 = base64.b64encode(audio_out).decode()
-        except NotImplementedError:
-            pass
-
-        return MultimodalChatResponse(
-            modality="voice",
-            answer=smart_resp.answer,
-            source=smart_resp.source,
-            chunks_used=list(smart_resp.chunks_used),
-            confidence=smart_resp.confidence,
-            retrieval_method=smart_resp.retrieval_method,
-            transcript=transcript,
-            audio_base64=audio_base64,
-            audio_mime="audio/mpeg" if audio_base64 else None,
-        )
+        # TODO 4a: voice branch
+        # Steps:
+        #   audio_bytes = await audio.read()
+        #   transcript = await transcribe_audio(audio_bytes, audio.filename or "audio.webm")
+        #   smart_resp = await smart_chat(session_id, SmartChatRequest(message=transcript), tenant_id)
+        #   audio_out = await synthesize_speech(smart_resp.answer)
+        #   return MultimodalChatResponse(
+        #       modality="voice", answer=smart_resp.answer, source=smart_resp.source,
+        #       chunks_used=list(smart_resp.chunks_used), confidence=smart_resp.confidence,
+        #       transcript=transcript, audio_base64=base64.b64encode(audio_out).decode(),
+        #       audio_mime="audio/mpeg",
+        #   )
+        raise HTTPException(status_code=501, detail="TODO 4a: implement voice branch")
 
     if modality == "vision":
-        if image is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Vision modality selected but no image file was provided.",
-            )
-
-        image_bytes = await image.read()
-
-        text_prompt = (
-            prompt
-            or message
-            or "Describe this image in detail."
-        )
-
-        result = await analyze_image(
-            image_bytes,
-            text_prompt,
-        )
-
-        answer = result.content or ""
-
-        session = get_session(
-            session_id,
-            tenant_id=tenant_id,
-        )
-
-        if session:
-            add_message(
-                session_id,
-                "user",
-                f"[IMAGE] {text_prompt}",
-            )
-            add_message(
-                session_id,
-                "assistant",
-                answer,
-            )
-
-        return MultimodalChatResponse(
-            modality="vision",
-            answer=answer,
-            model_used=result.model,
-        )
+        # TODO 4b: vision branch
+        # Steps:
+        #   image_bytes = await image.read()
+        #   text_prompt = prompt or message or "Describe this image in detail."
+        #   result = await analyze_image(image_bytes, text_prompt)
+        #   answer = result.content or ""
+        #   # optionally store in session...
+        #   return MultimodalChatResponse(modality="vision", answer=answer, model_used=result.model)
+        raise HTTPException(status_code=501, detail="TODO 4b: implement vision branch")
 
     # Text branch — delegates to smart_chat (working)
     smart_resp = await smart_chat(session_id, SmartChatRequest(message=message), tenant_id)
